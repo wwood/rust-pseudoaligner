@@ -18,7 +18,7 @@ use crate::equiv_classes::{CountFilterEqClass, EqClassIdType};
 use crate::pseudoaligner::Pseudoaligner;
 use boomphf;
 use failure::Error;
-use log::info;
+use log::{info, error};
 use rayon::prelude::*;
 use rayon::{self, ThreadPool};
 
@@ -109,7 +109,7 @@ pub fn validate_dbg<K: Kmer + Sync + Send>(seqs: &[DnaString], al: &Pseudoaligne
         test_eqclass.dedup();
 
         if test_eqclass.len() > 5000 {
-            println!("kmer: {:?}, eqclass.len(): {}", k, test_eqclass.len());
+            error!("kmer: {:?}, eqclass.len(): {}", k, test_eqclass.len());
         }
 
         let (node_id, _) = al.dbg_index.get(&k).unwrap();
@@ -121,7 +121,7 @@ pub fn validate_dbg<K: Kmer + Sync + Send>(seqs: &[DnaString], al: &Pseudoaligne
         dbg_eq_clone.dedup();
 
         if &dbg_eq_clone != dbg_eqclass {
-            println!(
+            error!(
                 "dbg eq class not unique: eqclass_id: {}, node: {}",
                 eq_class, node_id
             );
@@ -167,26 +167,26 @@ pub fn validate_dbg<K: Kmer + Sync + Send>(seqs: &[DnaString], al: &Pseudoaligne
                 al.map_read_to_nodes(s, &mut path_buf).unwrap();
                 let my_nodes: HashSet<usize> = HashSet::from_iter(path_buf.iter().cloned());
 
-                println!("eqclass: {:?}", eqclass);
+                info!("eqclass: {:?}", eqclass);
                 for i in &eqclass {
-                    println!(
+                    info!(
                         "{}: {}, len:{}",
                         i,
                         al.tx_names[*i as usize],
                         seqs[*i as usize].len()
                     );
-                    println!("{:?}", seqs[*i as usize]);
+                    info!("{:?}", seqs[*i as usize]);
 
                     let r = al
                         .map_read_to_nodes(&seqs[*i as usize], &mut path_buf)
                         .unwrap();
                     let other_nodes = HashSet::from_iter(path_buf.iter().cloned());
 
-                    println!("r: {:?}", r);
-                    println!("{:?}", path_buf);
+                    info!("r: {:?}", r);
+                    info!("{:?}", path_buf);
 
                     assert!(my_nodes.is_subset(&other_nodes));
-                    println!("---");
+                    info!("---");
                 }
             }
 
@@ -298,13 +298,13 @@ fn make_dbg_index<K: Kmer + Sync + Send>(
         total_kmers += node.len() - kmer_length + 1;
     }
 
-    println!("Total {:?} kmers to process in dbg", total_kmers);
-    println!("Making mphf of kmers");
+    info!("Total {:?} kmers to process in dbg", total_kmers);
+    info!("Making mphf of kmers");
     let mphf =
         //boomphf::Mphf::from_chunked_iterator(1.7, dbg, total_kmers);
         boomphf::Mphf::from_chunked_iterator_parallel(1.7, dbg, None, total_kmers, num_threads);
 
-    println!("Assigning offsets to kmers");
+    info!("Assigning offsets to kmers");
     let mut node_and_offsets = Vec::with_capacity(total_kmers);
     node_and_offsets.resize(total_kmers, (U32_MAX as u32, U32_MAX as u32));
 
