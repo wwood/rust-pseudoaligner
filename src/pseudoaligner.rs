@@ -15,7 +15,7 @@ use debruijn::dna_string::DnaString;
 use debruijn::graph::DebruijnGraph;
 use debruijn::{Dir, Kmer, Mer, Vmer};
 use failure::Error;
-use log::info;
+use log::{info,trace};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{LEFT_EXTEND_FRACTION, READ_COVERAGE_THRESHOLD};
@@ -29,6 +29,10 @@ pub struct Pseudoaligner<K: Kmer> {
     pub dbg_index: NoKeyBoomHashMap<K, (u32, u32)>,
     pub tx_names: Vec<String>,
     pub tx_gene_mapping: HashMap<String, String>,
+}
+
+enum SenseDirection {
+    Sense, AntiSense
 }
 
 impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
@@ -85,6 +89,7 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
                             let ref_kmer: K = ref_seq_slice.get_kmer(*offset as usize);
 
                             if read_kmer == ref_kmer {
+                                trace!("Found matching ref_kmer {:?} from node {}", ref_kmer, *nid);
                                 return Some((*nid as usize, *offset as usize));
                             }
                         }
@@ -101,6 +106,8 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
                 None => (None, None),
                 Some((nid, offset)) => (Some(nid), Some(offset)),
             };
+            trace!("Found first kmer match: kmer_pos {:?} node {:?} kmer_offset {:?}",
+                kmer_pos, node_id, kmer_offset);
 
             // check if we can extend back if there were SNP in every kmer query
             if kmer_pos >= left_extend_threshold && node_id.is_some() {
@@ -113,11 +120,10 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
                 };
 
                 loop {
+                    // TODO: Extend back needs adjustment for unstranded querying?
                     let node = self.dbg.get_node(prev_node_id);
-                    //println!("{:?}, {:?}, {:?}, {:?}, {:?}",
-                    //         node, node.sequence(),
-                    //         &eq_classes[ *node.data() as usize],
-                    //         prev_kmer_offset, last_pos);
+                    trace!("extend_back: kmer_pos {:?}, node {:?}, kmer_offset {:?}",
+                        kmer_pos, node, kmer_offset);
 
                     // length of remaining read before kmer match
                     let skipped_read = last_pos + 1;
@@ -186,12 +192,14 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
 
             // forward search
             if kmer_pos <= last_kmer_pos {
+                
+                // The last node matched in this direction (Left=sense, Right=antisense)
+                let mut node_sense = SenseDirection::Sense;
+
                 loop {
                     let node = self.dbg.get_node(node_id.unwrap());
-                    //println!("{:?}, {:?}, {:?}, {:?}",
-                    //         node, node.sequence(),
-                    //         &eq_classes[ *node.data() as usize],
-                    //         kmer_offset);
+                    trace!("forward_search: kmer_pos {:?}, node {:?}, kmer_offset {:?}",
+                        kmer_pos, node, kmer_offset);
                     kmer_pos += kmer_length;
                     read_coverage += kmer_length;
 
@@ -218,9 +226,11 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
                         let read_offset = kmer_pos + idx;
 
                         // compare base by base
+                        trace!("Determining match at ref_pos {}, read_offset {} ..", ref_pos, read_offset);
                         if ref_seq_slice.get(ref_pos) != read_seq.get(read_offset) {
                             // Allowing 2-SNP
                             seen_snp += 1;
+                            trace!("Mismatch at ref_pos {}, read_offset {}", ref_pos, read_offset);
                             if seen_snp > 2 {
                                 premature_break = true;
                                 break;
@@ -241,23 +251,59 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
                     let exts = node.exts();
                     let next_base = read_seq.get(kmer_pos);
 
-                    if !premature_break && exts.has_ext(Dir::Right, next_base) {
-                        // found a right extention.
-                        let index = exts
-                            .get(Dir::Right)
-                            .iter()
-                            .position(|&x| x == next_base)
-                            .unwrap();
+                    let search_direction = match node_sense {
+                        SenseDirection::Sense => Dir::Right,
+                        SenseDirection::AntiSense => Dir::Left,
+                    };
+                    trace!("Looking for next base {} in direction {:?}, exts: {:?} (premature break {})", next_base, search_direction, exts, premature_break);
+                    let index_opt = if premature_break {
+                        None
+                    } else {
+                        match node_sense {
+                            SenseDirection::Sense => exts
+                                .get(Dir::Right)
+                                .iter()
+                                .position(|&x| x == next_base),
+                            SenseDirection::AntiSense => {
+                                // Overall the ext bits are: right left T G C A T G C A
+                                let c_base = match next_base {
+                                    0 => 3,
+                                    1 => 2,
+                                    2 => 1,
+                                    3 => 0,
+                                    _ => unreachable!()
+                                };
+                                trace!("Matching with rc base {} against ext dir get {:?}", c_base, exts.get(Dir::Left));
+                                exts
+                                    .get(Dir::Left)
+                                    .iter()
+                                    .position(|&x| x == c_base)
+                            }
+                        }
+                    };
+                    trace!("Found index_opt {:?}", index_opt);
+                    if index_opt.is_some() {
+                        // found an extention in the expected direction.
+                        let index = index_opt.unwrap();
 
-                        let edge = node.r_edges()[index];
+                        let edge = match node_sense {
+                            SenseDirection::Sense => node.r_edges()[index],
+                            SenseDirection::AntiSense => node.l_edges()[index],
+                        };
+                        trace!("Found edge: {:?}", edge);
 
                         //update the next node's id
                         node_id = Some(edge.0);
                         kmer_offset = Some(0);
+                        node_sense = match edge.2 {
+                            true => SenseDirection::AntiSense,
+                            false => SenseDirection::Sense
+                        };
 
                         //adjust for kmer_position
                         kmer_pos -= kmer_length - 1;
                         read_coverage -= kmer_length - 1;
+
                     } else {
                         // can't extend node in dbg extract read using mphf
                         // TODO: might have to check some cases
@@ -291,6 +337,7 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
             None
         } else {
             //println!("lookups: {} -- cov: {}", kmer_lookups, read_coverage);
+            trace!("For this read, found nodes {:?}",nodes);
             Some(read_coverage)
         }
     }
