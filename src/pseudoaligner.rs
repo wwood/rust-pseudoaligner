@@ -18,7 +18,7 @@ use failure::Error;
 use log::{info,trace};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{LEFT_EXTEND_FRACTION, READ_COVERAGE_THRESHOLD};
+use crate::config::{LEFT_EXTEND_FRACTION, READ_COVERAGE_THRESHOLD, STRANDED};
 use crate::equiv_classes::EqClassIdType;
 use crate::utils;
 
@@ -74,9 +74,9 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
 
         {
             // Scan the read for the first kmer that exists in the reference
-            let mut find_kmer_match = |kmer_pos: &mut usize| -> Option<(usize, usize)> {
+            let mut find_kmer_match = |kmer_pos: &mut usize| -> Option<(usize, usize, SenseDirection)> {
                 while *kmer_pos <= last_kmer_pos {
-                    let read_kmer = read_seq.get_kmer(*kmer_pos);
+                    let read_kmer: K = read_seq.get_kmer(*kmer_pos);
 
                     kmer_lookups += 1;
                     match self.dbg_index.get(&read_kmer) {
@@ -87,10 +87,29 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
                             let node = self.dbg.get_node(*nid as usize);
                             let ref_seq_slice = node.sequence();
                             let ref_kmer: K = ref_seq_slice.get_kmer(*offset as usize);
+                            trace!("read (forward) kmer {:?}, ref_kmer {:?}, sequence {:?}", read_kmer, ref_kmer, ref_seq_slice);
 
                             if read_kmer == ref_kmer {
-                                trace!("Found matching ref_kmer {:?} from node {}", ref_kmer, *nid);
-                                return Some((*nid as usize, *offset as usize));
+                                trace!("Found forward matching ref_kmer {:?} from node {}", ref_kmer, *nid);
+                                return Some((*nid as usize, *offset as usize, SenseDirection::Sense));
+                            }
+                        }
+                    };
+                    if !STRANDED {
+                        match self.dbg_index.get(&read_kmer.rc()) {
+                            None => (),
+                            Some((nid, offset)) => {
+                                // Verify that the kmer actually matches -- the MPHF can have false
+                                // positives.
+                                let node = self.dbg.get_node(*nid as usize);
+                                let ref_seq_slice = node.sequence();
+                                let ref_kmer: K = ref_seq_slice.get_kmer(*offset as usize);
+                                trace!("read (reverse) kmer {:?}, ref_kmer {:?}, sequence {:?}", read_kmer, ref_kmer, ref_seq_slice);
+
+                                if read_kmer.rc() == ref_kmer {
+                                    trace!("Found reverse matching ref_kmer {:?} from node {}", ref_kmer, *nid);
+                                    return Some((*nid as usize, *offset as usize, SenseDirection::AntiSense));
+                                }
                             }
                         }
                     };
@@ -102,9 +121,9 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
 
             // extract the first exact matching position of a kmer
             // from the read in the DBG
-            let (mut node_id, mut kmer_offset) = match find_kmer_match(&mut kmer_pos) {
-                None => (None, None),
-                Some((nid, offset)) => (Some(nid), Some(offset)),
+            let (mut node_id, mut kmer_offset, mut node_sense) = match find_kmer_match(&mut kmer_pos) {
+                None => (None, None, SenseDirection::Sense),
+                Some((nid, offset, node_sense)) => (Some(nid), Some(offset), node_sense),
             };
             trace!("Found first kmer match: kmer_pos {:?} node {:?} kmer_offset {:?}",
                 kmer_pos, node_id, kmer_offset);
@@ -192,9 +211,6 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
 
             // forward search
             if kmer_pos <= last_kmer_pos {
-                
-                // The last node matched in this direction (Left=sense, Right=antisense)
-                let mut node_sense = SenseDirection::Sense;
 
                 loop {
                     let node = self.dbg.get_node(node_id.unwrap());
@@ -221,13 +237,18 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
                     let mut premature_break = false;
                     let mut matched_bases = 0;
                     let mut seen_snp = 0;
+                    let node_seq_to_match = match node_sense {
+                        SenseDirection::Sense => ref_seq_slice,
+                        SenseDirection::AntiSense => ref_seq_slice.rc()
+                    };
                     for idx in 0..max_matchable_pos {
                         let ref_pos = ref_offset + idx;
                         let read_offset = kmer_pos + idx;
 
                         // compare base by base
                         trace!("Determining match at ref_pos {}, read_offset {} ..", ref_pos, read_offset);
-                        if ref_seq_slice.get(ref_pos) != read_seq.get(read_offset) {
+
+                        if node_seq_to_match.get(ref_pos) != read_seq.get(read_offset) {
                             // Allowing 2-SNP
                             seen_snp += 1;
                             trace!("Mismatch at ref_pos {}, read_offset {}", ref_pos, read_offset);
@@ -295,9 +316,11 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
                         //update the next node's id
                         node_id = Some(edge.0);
                         kmer_offset = Some(0);
-                        node_sense = match edge.2 {
-                            true => SenseDirection::AntiSense,
-                            false => SenseDirection::Sense
+                        node_sense = match (edge.2, node_sense) {
+                            (true,  SenseDirection::Sense) => SenseDirection::AntiSense,
+                            (true,  SenseDirection::AntiSense) => SenseDirection::Sense,
+                            (false, SenseDirection::Sense) => SenseDirection::Sense,
+                            (false, SenseDirection::AntiSense) => SenseDirection::AntiSense,
                         };
 
                         //adjust for kmer_position
@@ -315,9 +338,10 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
                         // get the match through mphf
                         match find_kmer_match(&mut kmer_pos) {
                             None => break,
-                            Some((nid, offset)) => {
+                            Some((nid, offset, node_s)) => {
                                 node_id = Some(nid);
                                 kmer_offset = Some(offset);
+                                node_sense = node_s;
                             }
                         };
                     }
