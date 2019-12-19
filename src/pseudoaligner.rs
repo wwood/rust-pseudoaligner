@@ -31,6 +31,7 @@ pub struct Pseudoaligner<K: Kmer> {
     pub tx_gene_mapping: HashMap<String, String>,
 }
 
+#[derive(Debug)]
 enum SenseDirection {
     Sense, AntiSense
 }
@@ -214,8 +215,8 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
 
                 loop {
                     let node = self.dbg.get_node(node_id.unwrap());
-                    trace!("forward_search: kmer_pos {:?}, node {:?}, kmer_offset {:?}",
-                        kmer_pos, node, kmer_offset);
+                    trace!("forward_search: kmer_pos {:?}, node {:?}, kmer_offset {:?}, sense {:?}",
+                        kmer_pos, node, kmer_offset, node_sense);
                     kmer_pos += kmer_length;
                     read_coverage += kmer_length;
 
@@ -226,10 +227,20 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
                     let remaining_read = read_length - kmer_pos;
 
                     // length of the remaining node sequence after kmer match
-                    let ref_seq_slice = node.sequence();
-                    let ref_length = ref_seq_slice.len();
-                    let ref_offset = kmer_offset.unwrap() + kmer_length;
-                    let informative_ref = ref_length - ref_offset;
+                    let (ref_seq_slice, ref_offset, informative_ref) = match node_sense {
+                        SenseDirection::Sense => {
+                            let ref_seq_slice = node.sequence();
+                            let ref_length = ref_seq_slice.len();
+                            let ref_offset = kmer_offset.unwrap() + kmer_length;
+                            (ref_seq_slice, ref_offset, ref_length - ref_offset)
+                        },
+                        SenseDirection::AntiSense => {
+                            let ref_seq_slice = node.sequence().rc();
+                            let ref_length = ref_seq_slice.len();
+                            let ref_offset = ref_length - kmer_offset.unwrap();
+                            (ref_seq_slice, ref_offset, ref_length - ref_offset)
+                        }
+                    };
 
                     // find maximum extention possbile before fork or eof read
                     let max_matchable_pos = std::cmp::min(remaining_read, informative_ref);
@@ -237,10 +248,6 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
                     let mut premature_break = false;
                     let mut matched_bases = 0;
                     let mut seen_snp = 0;
-                    let node_seq_to_match = match node_sense {
-                        SenseDirection::Sense => ref_seq_slice,
-                        SenseDirection::AntiSense => ref_seq_slice.rc()
-                    };
                     for idx in 0..max_matchable_pos {
                         let ref_pos = ref_offset + idx;
                         let read_offset = kmer_pos + idx;
@@ -248,7 +255,7 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
                         // compare base by base
                         trace!("Determining match at ref_pos {}, read_offset {} ..", ref_pos, read_offset);
 
-                        if node_seq_to_match.get(ref_pos) != read_seq.get(read_offset) {
+                        if ref_seq_slice.get(ref_pos) != read_seq.get(read_offset) {
                             // Allowing 2-SNP
                             seen_snp += 1;
                             trace!("Mismatch at ref_pos {}, read_offset {}", ref_pos, read_offset);
