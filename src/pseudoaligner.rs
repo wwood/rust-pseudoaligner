@@ -211,6 +211,8 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
             } //end-if
 
             // forward search
+            let mut is_first_matching_kmer = true;
+
             if kmer_pos <= last_kmer_pos {
 
                 loop {
@@ -237,13 +239,24 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
                         SenseDirection::AntiSense => {
                             let ref_seq_slice = node.sequence().rc();
                             let ref_length = ref_seq_slice.len();
-                            let ref_offset = ref_length - kmer_offset.unwrap();
-                            (ref_seq_slice, ref_offset, ref_length - ref_offset)
+                            (
+                                ref_seq_slice,
+                                match is_first_matching_kmer {
+                                    true => ref_length - kmer_offset.unwrap(),
+                                    false => 0
+                                },
+                                match is_first_matching_kmer {
+                                    true => kmer_offset.unwrap(),
+                                    false => ref_length - kmer_offset.unwrap()
+                                }
+                            )
                         }
                     };
+                    is_first_matching_kmer = false;
 
                     // find maximum extention possbile before fork or eof read
                     let max_matchable_pos = std::cmp::min(remaining_read, informative_ref);
+                    trace!("Found max_matchable_pos {} from remaining read {} and ref {} (ref offset {})", max_matchable_pos, remaining_read, informative_ref, ref_offset);
 
                     let mut premature_break = false;
                     let mut matched_bases = 0;
@@ -318,16 +331,26 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
                             SenseDirection::Sense => node.r_edges()[index],
                             SenseDirection::AntiSense => node.l_edges()[index],
                         };
-                        trace!("Found edge: {:?}", edge);
+                        trace!("Found edge: {:?} with current sense {:?}", edge, node_sense);
 
                         //update the next node's id
                         node_id = Some(edge.0);
                         kmer_offset = Some(0);
-                        node_sense = match (edge.2, node_sense) {
-                            (true,  SenseDirection::Sense) => SenseDirection::AntiSense,
-                            (true,  SenseDirection::AntiSense) => SenseDirection::Sense,
-                            (false, SenseDirection::Sense) => SenseDirection::Sense,
-                            (false, SenseDirection::AntiSense) => SenseDirection::AntiSense,
+                        // Edges are (target_node id, incoming side of target node, whether target node has is flipped)
+                        // or (
+                        // target_node_id,
+                        // incoming direction of this edge on the target node,
+                        // boolean indicating what the 'direction of travel' is by traversing this edge
+                        // )
+                        // node_sense = match (edge.2, node_sense) {
+                        //     (true,  SenseDirection::Sense) => SenseDirection::AntiSense,
+                        //     (true,  SenseDirection::AntiSense) => SenseDirection::Sense,
+                        //     (false, SenseDirection::Sense) => SenseDirection::Sense,
+                        //     (false, SenseDirection::AntiSense) => SenseDirection::AntiSense,
+                        // };
+                        node_sense = match edge.2 {
+                            true => SenseDirection::AntiSense,
+                            false => SenseDirection::Sense,
                         };
 
                         //adjust for kmer_position
