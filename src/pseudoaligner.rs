@@ -18,7 +18,7 @@ use failure::Error;
 use log::{info,trace};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{LEFT_EXTEND_FRACTION, READ_COVERAGE_THRESHOLD, STRANDED};
+use crate::config::{LEFT_EXTEND_FRACTION, READ_COVERAGE_THRESHOLD};
 use crate::equiv_classes::EqClassIdType;
 use crate::utils;
 
@@ -34,6 +34,12 @@ pub struct Pseudoaligner<K: Kmer> {
 #[derive(Debug)]
 enum SenseDirection {
     Sense, AntiSense
+}
+
+#[derive(Debug)]
+pub struct MappingHit {
+    pub read_coverage: usize,
+    pub first_base_offset: usize,
 }
 
 impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
@@ -53,8 +59,9 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
         }
     }
 
-    /// Pseudo-align `read_seq` and return a list of nodes that the read was aligned to
-    pub fn map_read_to_nodes(&self, read_seq: &DnaString, nodes: &mut Vec<usize>) -> Option<usize> {
+    /// Pseudo-align `read_seq` and return a list of nodes that the read was
+    /// aligned to, and the position of the first matching base
+    pub fn map_read_to_nodes(&self, read_seq: &DnaString, nodes: &mut Vec<usize>) -> Option<MappingHit> {
         let read_length = read_seq.len();
         let mut read_coverage: usize = 0;
 
@@ -72,6 +79,8 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
 
         let last_kmer_pos = read_length - kmer_length;
         let mut kmer_lookups = 0;
+
+        let first_base_offset_opt;
 
         {
             // Scan the read for the first kmer that exists in the reference
@@ -96,21 +105,19 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
                             }
                         }
                     };
-                    if !STRANDED {
-                        match self.dbg_index.get(&read_kmer.rc()) {
-                            None => (),
-                            Some((nid, offset)) => {
-                                // Verify that the kmer actually matches -- the MPHF can have false
-                                // positives.
-                                let node = self.dbg.get_node(*nid as usize);
-                                let ref_seq_slice = node.sequence();
-                                let ref_kmer: K = ref_seq_slice.get_kmer(*offset as usize);
-                                trace!("read (reverse) kmer {:?}, ref_kmer {:?}, sequence {:?}", read_kmer, ref_kmer, ref_seq_slice);
+                    match self.dbg_index.get(&read_kmer.rc()) {
+                        None => (),
+                        Some((nid, offset)) => {
+                            // Verify that the kmer actually matches -- the MPHF can have false
+                            // positives.
+                            let node = self.dbg.get_node(*nid as usize);
+                            let ref_seq_slice = node.sequence();
+                            let ref_kmer: K = ref_seq_slice.get_kmer(*offset as usize);
+                            trace!("read (reverse) kmer {:?}, ref_kmer {:?}, sequence {:?}", read_kmer, ref_kmer, ref_seq_slice);
 
-                                if read_kmer.rc() == ref_kmer {
-                                    trace!("Found reverse matching ref_kmer {:?} from node {}", ref_kmer, *nid);
-                                    return Some((*nid as usize, *offset as usize, SenseDirection::AntiSense));
-                                }
+                            if read_kmer.rc() == ref_kmer {
+                                trace!("Found reverse matching ref_kmer {:?} from node {}", ref_kmer, *nid);
+                                return Some((*nid as usize, *offset as usize, SenseDirection::AntiSense));
                             }
                         }
                     };
@@ -129,7 +136,14 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
             trace!("Found first kmer match: kmer_pos {:?} node {:?} kmer_offset {:?}",
                 kmer_pos, node_id, kmer_offset);
 
+            // TODO: Adjust the first matching position to account for the extending back
+            first_base_offset_opt = match kmer_offset {
+                Some(offset) => Some(offset),
+                None => None
+            };
+
             // check if we can extend back if there were SNP in every kmer query
+            // TODO: Adjust this if block to be unstranded
             if kmer_pos >= left_extend_threshold && node_id.is_some() {
                 let mut last_pos = kmer_pos - 1;
                 let mut prev_node_id = node_id.unwrap();
@@ -388,7 +402,10 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
         } else {
             //println!("lookups: {} -- cov: {}", kmer_lookups, read_coverage);
             trace!("For this read, found nodes {:?}",nodes);
-            Some(read_coverage)
+            Some(MappingHit {
+                read_coverage: read_coverage,
+                first_base_offset: first_base_offset_opt.unwrap()
+            })
         }
     }
 
@@ -436,10 +453,10 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
         let mut nodes = Vec::new();
 
         match self.map_read_to_nodes(read_seq, &mut nodes) {
-            Some(read_coverage) => {
+            Some(mapping_hit) => {
                 let mut eq_class = Vec::new();
                 self.nodes_to_eq_class(&mut nodes, &mut eq_class);
-                Some((eq_class, read_coverage))
+                Some((eq_class, mapping_hit.read_coverage))
             }
             None => None,
         }
