@@ -243,11 +243,11 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
                                 ref_seq_slice,
                                 match is_first_matching_kmer {
                                     true => ref_length - kmer_offset.unwrap(),
-                                    false => 0
+                                    false => kmer_length
                                 },
                                 match is_first_matching_kmer {
                                     true => kmer_offset.unwrap(),
-                                    false => ref_length - kmer_offset.unwrap()
+                                    false => ref_length - kmer_offset.unwrap() - kmer_length
                                 }
                             )
                         }
@@ -342,15 +342,11 @@ impl<K: Kmer + Sync + Send> Pseudoaligner<K> {
                         // incoming direction of this edge on the target node,
                         // boolean indicating what the 'direction of travel' is by traversing this edge
                         // )
-                        // node_sense = match (edge.2, node_sense) {
-                        //     (true,  SenseDirection::Sense) => SenseDirection::AntiSense,
-                        //     (true,  SenseDirection::AntiSense) => SenseDirection::Sense,
-                        //     (false, SenseDirection::Sense) => SenseDirection::Sense,
-                        //     (false, SenseDirection::AntiSense) => SenseDirection::AntiSense,
-                        // };
-                        node_sense = match edge.2 {
-                            true => SenseDirection::AntiSense,
-                            false => SenseDirection::Sense,
+                        node_sense = match (edge.2, node_sense) {
+                            (true,  SenseDirection::Sense) => SenseDirection::AntiSense,
+                            (true,  SenseDirection::AntiSense) => SenseDirection::Sense,
+                            (false, SenseDirection::Sense) => SenseDirection::Sense,
+                            (false, SenseDirection::AntiSense) => SenseDirection::AntiSense,
                         };
 
                         //adjust for kmer_position
